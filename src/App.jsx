@@ -1,5 +1,21 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { 
+  faFilePdf, 
+  faChevronLeft, 
+  faChevronRight, 
+  faDownload, 
+  faCheckDouble, 
+  faRotateLeft, 
+  faCircleCheck,
+  faTriangleExclamation,
+  faCircleXmark,
+  faMagnifyingGlass,
+  faCheck,
+  faForwardStep, // Icon สำหรับปุ่มข้าม
+  faKeyboard     // Icon คีย์บอร์ด
+} from "@fortawesome/free-solid-svg-icons";
 
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import "react-pdf/dist/Page/TextLayer.css";
@@ -10,16 +26,10 @@ pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.vers
 function App() {
   const [numPages, setNumPages] = useState(null);
   const [pageNumber, setPageNumber] = useState(1);
-  
-  // เก็บข้อมูล Issues ทั้งหมด
   const [allIssues, setAllIssues] = useState([]);
-  
-  // เก็บขนาดของหน้า PDF
   const [pageDimensions, setPageDimensions] = useState({ width: 0, height: 0 });
 
-  // ==========================================
-  // 1. โหลดและ Parse CSV
-  // ==========================================
+  // 1. Load CSV
   useEffect(() => {
     fetch("/report_full_683130_THESIS_FULL_PAPER.csv") 
       .then((response) => response.text())
@@ -30,230 +40,265 @@ function App() {
         for (let i = 1; i < lines.length; i++) {
           const line = lines[i];
           const parts = line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
-          
           if (parts.length < 5) continue;
-
-          const page = parseInt(parts[0].trim());
-          const code = parts[1].trim();
-          const severity = parts[2].trim().toLowerCase();
-          const message = parts[3].trim().replace(/^"|"$/g, '');
-          const bboxString = parts[4].trim().replace(/^"|"$/g, '');
 
           let bbox = null;
           try {
-            bbox = JSON.parse(bboxString);
-            if (!Array.isArray(bbox) || bbox.length !== 4 || !bbox.some(v => v !== 0)) {
-               bbox = null;
-            }
+            bbox = JSON.parse(parts[4].trim().replace(/^"|"$/g, ''));
+            if (!Array.isArray(bbox) || bbox.length !== 4 || !bbox.some(v => v !== 0)) bbox = null;
           } catch (e) { bbox = null; }
 
           parsedIssues.push({ 
               id: i,
-              page, 
-              code, 
-              severity, 
-              message, 
+              page: parseInt(parts[0].trim()), 
+              code: parts[1].trim(), 
+              severity: parts[2].trim().toLowerCase(), 
+              message: parts[3].trim().replace(/^"|"$/g, ''), 
               bbox,
               isIgnored: false 
           });
         }
-        
         setAllIssues(parsedIssues);
       })
       .catch((error) => console.error("Error loading CSV:", error));
   }, []);
 
-  // ==========================================
-  // Toggle Logic
-  // ==========================================
+  // ------------------------------------------------------------------
+  // Helper Functions (ย้ายมาไว้ข้างบน เพื่อเรียกใช้ใน Logic อื่นได้)
+  // ------------------------------------------------------------------
+  
+  // เช็คสถานะของหน้าที่ระบุ
+  const getPageStatus = useCallback((p) => {
+    const issues = allIssues.filter(i => i.page === p);
+    if (issues.length === 0) return 'clean';
+    
+    const active = issues.filter(i => !i.isIgnored);
+    if (active.some(i => i.severity === 'error')) return 'error';
+    if (active.some(i => i.severity === 'warning')) return 'warning';
+    
+    // ถ้าเคยมี issues แต่แก้หมดแล้ว
+    return 'resolved';
+  }, [allIssues]);
+
+  // หาหน้าถัดไปที่มีปัญหา (Warning/Error)
+  const findNextProblemPage = useCallback(() => {
+    if (!numPages) return null;
+    for (let p = pageNumber + 1; p <= numPages; p++) {
+        const status = getPageStatus(p);
+        if (status === 'error' || status === 'warning') {
+            return p;
+        }
+    }
+    return null;
+  }, [pageNumber, numPages, getPageStatus]);
+
+  // ------------------------------------------------------------------
+  // Actions
+  // ------------------------------------------------------------------
+
   const toggleIssueStatus = (issueId) => {
-    setAllIssues(prev => prev.map(issue => 
-        issue.id === issueId 
-            ? { ...issue, isIgnored: !issue.isIgnored } 
-            : issue
-    ));
+    setAllIssues(prev => prev.map(issue => issue.id === issueId ? { ...issue, isIgnored: !issue.isIgnored } : issue));
   };
 
   const handleTogglePageIgnore = () => {
-    const hasActiveIssues = currentPageIssues.some(i => !i.isIgnored);
-    const newStatus = hasActiveIssues ? true : false;
+    const pageIssues = allIssues.filter(i => i.page === pageNumber);
+    const hasActive = pageIssues.some(i => !i.isIgnored);
+    
+    // ถ้ามี Active -> Mark Resolved ทั้งหมด
+    // ถ้าไม่มี Active -> Undo กลับมา
+    setAllIssues(prev => prev.map(issue => issue.page === pageNumber ? { ...issue, isIgnored: hasActive } : issue));
+  };
 
-    setAllIssues(prev => prev.map(issue => 
-        issue.page === pageNumber 
-            ? { ...issue, isIgnored: newStatus } 
-            : issue
-    ));
+  // [NEW] ฟังก์ชันสำหรับ Speed Review (Approve & Next)
+  const handleQuickApproveAndNext = () => {
+    // 1. Mark หน้านี้เป็น Resolved (ถ้ามีปัญหา)
+    const pageIssues = allIssues.filter(i => i.page === pageNumber);
+    const hasActive = pageIssues.some(i => !i.isIgnored);
+
+    if (hasActive) {
+        setAllIssues(prev => prev.map(issue => issue.page === pageNumber ? { ...issue, isIgnored: true } : issue));
+    }
+
+    // 2. ไปหน้าถัดไปทันที
+    if (pageNumber < (numPages || 0)) {
+        setPageNumber(p => p + 1);
+    }
+  };
+
+  // [NEW] ฟังก์ชันกระโดดไปหน้าที่มีปัญหาถัดไป
+  const jumpToNextIssue = () => {
+      const nextProblemPage = findNextProblemPage();
+      if (nextProblemPage) {
+          setPageNumber(nextProblemPage);
+      } else {
+          alert("🎉 เยี่ยมมาก! ตรวจครบทุกหน้าแล้ว ไม่พบปัญหาเหลืออยู่");
+      }
   };
 
   const handleExportCSV = () => {
       const activeIssues = allIssues.filter(i => !i.isIgnored);
-      const header = "Page,Code,Severity,Message,BBox\n";
-      const rows = activeIssues.map(i => {
-          const bboxStr = i.bbox ? `"${JSON.stringify(i.bbox)}"` : '""';
-          const msgStr = `"${i.message}"`;
-          return `${i.page},${i.code},${i.severity},${msgStr},${bboxStr}`;
-      }).join("\n");
-
-      const blob = new Blob([header + rows], { type: 'text/csv;charset=utf-8;' });
+      const rows = activeIssues.map(i => `${i.page},${i.code},${i.severity},"${i.message}","${i.bbox ? JSON.stringify(i.bbox) : ''}"`).join("\n");
+      const blob = new Blob(["Page,Code,Severity,Message,BBox\n" + rows], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
-      link.setAttribute("href", url);
-      link.setAttribute("download", "validated_report.csv");
-      link.style.visibility = 'hidden';
-      document.body.appendChild(link);
+      link.href = url;
+      link.download = "validated_report.csv";
       link.click();
-      document.body.removeChild(link);
-      
-      alert(`Exported ${activeIssues.length} active issues!`);
   };
 
-  // ==========================================
-  // 2. Filter Issues & Determine Page Status
-  // ==========================================
-  const currentPageIssues = useMemo(() => {
-    return allIssues.filter(issue => issue.page === pageNumber);
-  }, [allIssues, pageNumber]);
+  // ------------------------------------------------------------------
+  // [NEW] Keyboard Shortcuts Listener
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+        // ป้องกันการทำงานถ้า user พิมพ์ในช่อง Input (ถ้ามีอนาคต)
+        if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
 
-  // [UPDATED] Logic แยกแยะสถานะหน้า
-  const getPageStatus = (page) => {
-    // 1. หา Issues ทั้งหมดของหน้านั้น (ทั้งที่แก้แล้ว และยังไม่แก้)
-    const pageIssues = allIssues.filter(i => i.page === page);
-    
-    // 2. ถ้าหน้านี้ไม่เคยมี Error เลย -> 'clean' (Pass)
-    if (pageIssues.length === 0) return 'clean';
+        switch (e.key) {
+            case "ArrowRight":
+                setPageNumber(p => Math.min(numPages || 1, p + 1));
+                break;
+            case "ArrowLeft":
+                setPageNumber(p => Math.max(1, p - 1));
+                break;
+            case "Enter":
+                e.preventDefault(); // กัน scroll
+                handleQuickApproveAndNext(); // กด Enter เพื่อ Approve + ไปหน้าถัดไป
+                break;
+            default:
+                break;
+        }
+    };
 
-    // 3. หา Issues ที่ยัง Active อยู่ (ยังไม่กด Ignore)
-    const activeIssues = pageIssues.filter(i => !i.isIgnored);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [numPages, pageNumber, allIssues]); // Dependencies ต้องครบเพื่อให้ state ไม่อัปเดตผิด
 
-    // 4. ถ้ามี Active Error -> 'error'
-    if (activeIssues.some(i => i.severity === 'error')) return 'error';
-    
-    // 5. ถ้ามี Active Warning -> 'warning'
-    if (activeIssues.some(i => i.severity === 'warning')) return 'warning';
+  // ------------------------------------------------------------------
+  // Render Logic
+  // ------------------------------------------------------------------
+  const currentPageIssues = useMemo(() => allIssues.filter(i => i.page === pageNumber), [allIssues, pageNumber]);
 
-    // 6. ถ้าเคยมี Error แต่ตอนนี้ Active = 0 (แปลว่ากด Ignore หมดแล้ว) -> 'resolved' (Fixed)
-    return 'resolved';
-  };
-
-  // [UPDATED] เปลี่ยนสีตามสถานะใหม่
-  const getPageColor = (page) => {
-    const status = getPageStatus(page);
-    switch (status) {
-      case "error": return "bg-red-500 text-white hover:bg-red-600 border-red-600";
-      case "warning": return "bg-amber-400 text-black hover:bg-amber-500 border-amber-500";
-      case "resolved": return "bg-blue-100 text-blue-700 border-blue-300 font-semibold"; // สีฟ้าสำหรับหน้าที่มีการแก้ไข
-      case "clean": 
-      default: return "bg-emerald-100 text-emerald-700 hover:bg-emerald-200 border-emerald-200"; // สีเขียวสำหรับหน้า Perfect
+  const getPageColorClass = (page) => {
+    switch (getPageStatus(page)) {
+      case "error": return "bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100";
+      case "warning": return "bg-amber-50 text-amber-600 border-amber-200 hover:bg-amber-100";
+      case "resolved": return "bg-blue-50 text-blue-600 border-blue-200 hover:bg-blue-100";
+      default: return "bg-white text-slate-400 border-slate-200 hover:border-slate-400";
     }
   };
 
-  // ==========================================
-  // 3. Render Overlay
-  // ==========================================
   const renderOverlayBoxes = () => {
-    if (!pageDimensions.width || !pageDimensions.height || currentPageIssues.length === 0) return null;
-
+    if (!pageDimensions.width || currentPageIssues.length === 0) return null;
     return currentPageIssues.map((issue) => {
       if (!issue.bbox) return null;
-
       const [x0, y0, x1, y1] = issue.bbox;
-      const pdfW = pageDimensions.width; 
-      const pdfH = pageDimensions.height;
-
-      const left = (x0 / pdfW) * 100;
-      const top = (y0 / pdfH) * 100;
-      const width = ((x1 - x0) / pdfW) * 100;
-      const height = ((y1 - y0) / pdfH) * 100;
-
+      
       let borderColor = issue.severity === 'error' ? 'red' : '#fbbf24';
       let bgColor = issue.severity === 'error' ? 'rgba(255, 0, 0, 0.1)' : 'rgba(251, 191, 36, 0.2)';
-      
-      // ถ้าแก้แล้ว ให้เป็นสีฟ้า (ตาม theme Resolved) หรือสีเขียวก็ได้
-      if (issue.isIgnored) {
-          borderColor = '#3b82f6'; // Blue-500
-          bgColor = 'rgba(59, 130, 246, 0.2)'; // Blue tint
-      }
+      if (issue.isIgnored) { borderColor = '#3b82f6'; bgColor = 'rgba(59, 130, 246, 0.15)'; }
 
       return (
         <div
           key={issue.id}
-          onClick={(e) => {
-              e.stopPropagation();
-              toggleIssueStatus(issue.id);
-          }}
-          className="absolute group cursor-pointer transition-all hover:bg-opacity-40"
+          onClick={(e) => { e.stopPropagation(); toggleIssueStatus(issue.id); }}
+          className="absolute cursor-pointer transition-all duration-200 hover:opacity-80 hover:scale-[1.02]"
           style={{
-            left: `${left}%`,
-            top: `${top}%`,
-            width: `${width}%`,
-            height: `${height}%`,
+            left: `${(x0 / pageDimensions.width) * 100}%`,
+            top: `${(y0 / pageDimensions.height) * 100}%`,
+            width: `${((x1 - x0) / pageDimensions.width) * 100}%`,
+            height: `${((y1 - y0) / pageDimensions.height) * 100}%`,
             border: `2px solid ${borderColor}`,
             backgroundColor: bgColor,
             zIndex: 10,
+            borderRadius: '4px'
           }}
-        >
-          {!issue.isIgnored && (
-            <div className="hidden group-hover:block absolute bottom-full left-0 mb-1 w-max max-w-xs bg-black text-white text-xs p-2 rounded shadow-lg z-20 whitespace-normal pointer-events-none">
-                <span className="font-bold uppercase text-[10px] text-yellow-300">{issue.code}</span>
-                <br/>
-                {issue.message}
-            </div>
-          )}
-        </div>
+        />
       );
     });
   };
 
   return (
-    <div className="h-screen bg-gray-100 flex flex-col overflow-hidden font-sans">
-      {/* Header */}
-      <header className="bg-white border-b px-6 py-3 shadow-sm flex-shrink-0 z-10 flex justify-between items-center">
-        <div className="flex items-center gap-3">
-            <div className="bg-blue-600 text-white p-2 rounded-lg text-xl">🔍</div>
+    <div className="h-screen bg-slate-50 flex flex-col font-sans text-slate-700">
+      
+      {/* --- Header --- */}
+      <header className="bg-white/90 backdrop-blur-sm border-b border-slate-200 px-6 py-3 flex justify-between items-center sticky top-0 z-30 shadow-sm">
+        <div className="flex items-center gap-4">
+            <div className="w-10 h-10 bg-slate-900 text-white rounded-xl flex items-center justify-center shadow-lg shadow-slate-200">
+                <FontAwesomeIcon icon={faFilePdf} className="text-lg" />
+            </div>
             <div>
-                <h1 className="text-lg font-bold text-gray-800 leading-tight">Thesis Validator</h1>
-                <p className="text-xs text-gray-500">Visual Inspection Mode</p>
+                <h1 className="text-base font-bold text-slate-800 leading-tight">Thesis Validator</h1>
+                <div className="flex items-center gap-2 text-[10px] text-slate-400 font-medium tracking-wide">
+                    <span>AUTOMATED CHECK SYSTEM</span>
+                    <span className="text-slate-300">|</span>
+                    {/* Tooltip hint สำหรับคีย์ลัด */}
+                    <span className="flex items-center gap-1 text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
+                        <FontAwesomeIcon icon={faKeyboard} /> Press <b className="text-slate-800">Enter</b> to Approve & Next
+                    </span>
+                </div>
             </div>
         </div>
 
         <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2 bg-gray-50 px-3 py-1.5 rounded-full border">
-                <button onClick={() => setPageNumber(p => Math.max(1, p - 1))} disabled={pageNumber <= 1} className="text-gray-600 hover:text-blue-600 disabled:opacity-30">◀</button>
-                <span className="text-sm font-mono px-2">Page <span className="font-bold">{pageNumber}</span> / {numPages || "-"}</span>
-                <button onClick={() => setPageNumber(p => Math.min(numPages || 1, p + 1))} disabled={pageNumber >= numPages} className="text-gray-600 hover:text-blue-600 disabled:opacity-30">▶</button>
+            
+            {/* [NEW] Quick Jump Button */}
+            <button 
+                onClick={jumpToNextIssue}
+                className="text-xs font-semibold text-amber-600 bg-amber-50 hover:bg-amber-100 px-3 py-2 rounded-lg border border-amber-200 transition-all flex items-center gap-2"
+                title="Skip to next error/warning page"
+            >
+                <span>Next Issue</span>
+                <FontAwesomeIcon icon={faForwardStep} />
+            </button>
+
+            <div className="h-6 w-px bg-slate-200"></div>
+
+            {/* Pagination */}
+            <div className="flex items-center bg-slate-100 rounded-lg p-1 border border-slate-200">
+                <button 
+                    onClick={() => setPageNumber(p => Math.max(1, p - 1))} 
+                    disabled={pageNumber <= 1} 
+                    className="w-8 h-8 flex items-center justify-center hover:bg-white hover:shadow-sm rounded-md transition-all text-slate-500 disabled:opacity-30"
+                >
+                    <FontAwesomeIcon icon={faChevronLeft} size="xs" />
+                </button>
+                <span className="text-xs font-mono px-4 w-24 text-center select-none">
+                    Page <span className="font-bold text-slate-800">{pageNumber}</span> <span className="text-slate-400">/ {numPages || "-"}</span>
+                </span>
+                <button 
+                    onClick={() => setPageNumber(p => Math.min(numPages || 1, p + 1))} 
+                    disabled={pageNumber >= numPages} 
+                    className="w-8 h-8 flex items-center justify-center hover:bg-white hover:shadow-sm rounded-md transition-all text-slate-500 disabled:opacity-30"
+                >
+                    <FontAwesomeIcon icon={faChevronRight} size="xs" />
+                </button>
             </div>
 
             <button 
-                onClick={handleExportCSV}
-                className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-semibold flex items-center gap-2 shadow-sm transition-colors"
+                onClick={handleExportCSV} 
+                className="bg-slate-900 hover:bg-slate-800 text-white px-4 py-2 rounded-lg text-xs font-semibold transition-all shadow-md hover:shadow-lg flex items-center gap-2"
             >
-                <span>💾</span> Export Clean CSV
+                <FontAwesomeIcon icon={faDownload} />
+                <span>Export Report</span>
             </button>
         </div>
       </header>
 
-      {/* Main Content */}
+      {/* --- Body --- */}
       <div className="flex flex-1 overflow-hidden">
         
-        {/* Left: PDF View */}
-        <div className="flex-1 bg-slate-200 overflow-auto flex justify-center p-8 relative">
-          <div className="relative shadow-2xl h-fit"> 
-            <Document
-              file="/683130_THESIS_FULL_PAPER.pdf"
-              onLoadSuccess={({ numPages }) => setNumPages(numPages)}
-            >
+        {/* PDF Viewer */}
+        <div className="flex-1 bg-slate-100/50 overflow-auto flex justify-center p-8 relative scrollbar-thin scrollbar-thumb-slate-300">
+          <div className="relative shadow-2xl h-fit border border-slate-200/60 rounded-sm"> 
+            <Document file="/683130_THESIS_FULL_PAPER.pdf" onLoadSuccess={({ numPages }) => setNumPages(numPages)}>
               <Page 
                 pageNumber={pageNumber} 
-                width={750} 
+                width={720} 
+                className="bg-white"
                 renderTextLayer={false}
-                renderAnnotationLayer={true}
-                className="bg-white relative"
-                onLoadSuccess={(page) => {
-                    setPageDimensions({
-                        width: page.originalWidth, 
-                        height: page.originalHeight
-                    });
-                }}
+                renderAnnotationLayer={false}
+                onLoadSuccess={(page) => setPageDimensions({ width: page.originalWidth, height: page.originalHeight })}
               >
                   {renderOverlayBoxes()}
               </Page>
@@ -261,99 +306,102 @@ function App() {
           </div>
         </div>
 
-        {/* Right: Sidebar Navigation */}
-        <div className="w-80 bg-white border-l flex flex-col shadow-xl z-20">
-          <div className="p-4 border-b bg-gray-50">
-            <h2 className="font-semibold text-gray-800 mb-3">📑 Page Overview</h2>
-            {/* [UPDATED] Legend มีสีฟ้าเพิ่มเข้ามา */}
-            <div className="grid grid-cols-2 gap-2 text-[10px] font-medium text-gray-600">
-              <div className="flex items-center gap-1.5 bg-emerald-50 px-2 py-1 rounded border border-emerald-100"><div className="w-2 h-2 bg-emerald-500 rounded-full"></div> Pass (Original)</div>
-              <div className="flex items-center gap-1.5 bg-blue-50 px-2 py-1 rounded border border-blue-200"><div className="w-2 h-2 bg-blue-500 rounded-full"></div> Resolved (User)</div>
-              <div className="flex items-center gap-1.5 bg-amber-50 px-2 py-1 rounded border border-amber-100"><div className="w-2 h-2 bg-amber-400 rounded-full"></div> Warning</div>
-              <div className="flex items-center gap-1.5 bg-red-50 px-2 py-1 rounded border border-red-100"><div className="w-2 h-2 bg-red-500 rounded-full"></div> Error</div>
+        {/* Sidebar */}
+        <div className="w-96 bg-white border-l border-slate-200 flex flex-col z-20 shadow-[0_0_20px_rgba(0,0,0,0.03)]">
+          
+          {/* Status Overview */}
+          <div className="p-6 border-b border-slate-100">
+            <div className="flex justify-between items-center mb-4">
+                <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Document Map</h2>
             </div>
-          </div>
-
-          <div className="flex-1 overflow-y-auto p-3">
-            <div className="grid grid-cols-5 gap-2">
-              {numPages && Array.from(new Array(numPages), (_, index) => {
-                const pageIndex = index + 1;
-                const status = getPageStatus(pageIndex); // logic ใหม่
-                const isSelected = pageNumber === pageIndex;
-                
+            {/* Grid */}
+            <div className="grid grid-cols-8 gap-1.5 max-h-[25vh] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-200">
+              {numPages && Array.from(new Array(numPages), (_, i) => {
+                const p = i + 1;
                 return (
                   <button
-                    key={pageIndex}
-                    onClick={() => setPageNumber(pageIndex)}
-                    className={`
-                      aspect-square flex items-center justify-center rounded-lg text-xs transition-all duration-200 border relative
-                      ${getPageColor(pageIndex)}
-                      ${isSelected ? "ring-2 ring-blue-600 ring-offset-2 z-10 font-bold scale-105" : "opacity-90 hover:opacity-100"}
-                    `}
+                    key={p}
+                    onClick={() => setPageNumber(p)}
+                    className={`aspect-square rounded-[4px] text-[10px] font-medium transition-all border ${getPageColorClass(p)} ${pageNumber === p ? 'ring-2 ring-slate-800 ring-offset-1 z-10' : 'opacity-90'}`}
                   >
-                    {pageIndex}
-                    {status === 'error' && (
-                        <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
-                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-                            <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-600"></span>
-                        </span>
-                    )}
+                    {p}
                   </button>
                 );
               })}
             </div>
+            
+            {/* Legend */}
+            <div className="flex gap-4 mt-4 justify-start text-[10px] font-medium text-slate-500 pt-3 border-t border-slate-50">
+               <span className="flex items-center gap-1.5"><FontAwesomeIcon icon={faCircleXmark} className="text-rose-500" /> Error</span>
+               <span className="flex items-center gap-1.5"><FontAwesomeIcon icon={faTriangleExclamation} className="text-amber-400" /> Warn</span>
+               <span className="flex items-center gap-1.5"><FontAwesomeIcon icon={faCircleCheck} className="text-blue-500" /> Resolved</span>
+            </div>
           </div>
-          
-          {/* Detail Panel */}
-          <div className="h-1/3 border-t bg-gray-50 flex flex-col">
-             <div className="p-2 border-b bg-gray-100 text-xs font-bold text-gray-500 uppercase flex justify-between items-center">
-                <span>Issues on Page {pageNumber}</span>
-                
-                {/* ปุ่ม Mark Page OK */}
-                <div className="flex items-center gap-2">
-                    {currentPageIssues.length > 0 && (
-                        <button 
-                            onClick={handleTogglePageIgnore}
-                            className={`px-2 py-1 rounded text-[10px] font-bold transition-all border
-                                ${currentPageIssues.every(i => i.isIgnored) 
-                                    ? 'bg-gray-200 text-gray-600 border-gray-300 hover:bg-gray-300' 
-                                    : 'bg-blue-50 text-blue-600 border-blue-200 hover:bg-blue-100'
-                                }
-                            `}
-                        >
-                            {currentPageIssues.every(i => i.isIgnored) ? "Undo All" : "✅ Mark All OK"}
-                        </button>
-                    )}
-                    <span className="text-gray-400 min-w-[20px] text-right">{currentPageIssues.length}</span>
-                </div>
-             </div>
 
-             <div className="flex-1 overflow-y-auto p-2 space-y-2">
-                {currentPageIssues.length === 0 ? (
-                    <div className="text-center text-gray-400 text-sm mt-4">No issues found 🎉</div>
-                ) : (
-                    currentPageIssues.map((issue) => (
-                        <div 
-                            key={issue.id} 
-                            onClick={() => toggleIssueStatus(issue.id)} 
-                            className={`p-2 rounded border text-xs cursor-pointer transition-all
-                                ${issue.isIgnored 
-                                    ? 'bg-blue-50 border-blue-200 text-blue-700 line-through opacity-60' 
-                                    : issue.severity === 'error' 
-                                        ? 'bg-red-50 border-red-200 text-red-800 hover:bg-red-100' 
-                                        : 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'
-                                }
-                            `}
-                        >
-                            <div className="flex justify-between items-start">
-                                <div className="font-bold">{issue.code}</div>
-                                {issue.isIgnored && <span>✅</span>}
-                            </div>
-                            <div>{issue.message}</div>
-                        </div>
-                    ))
-                )}
+          {/* Issue List Header */}
+          <div className="px-6 py-4 bg-slate-50/50 border-b border-slate-100 flex justify-between items-center sticky top-0 z-10">
+             <div>
+                <h3 className="text-sm font-bold text-slate-800">Page {pageNumber}</h3>
+                <span className="text-[10px] text-slate-400">{currentPageIssues.length} issues found</span>
              </div>
+             
+             {currentPageIssues.length > 0 && (
+                <button 
+                    onClick={handleTogglePageIgnore} 
+                    className={`text-[10px] font-bold px-3 py-1.5 rounded-full border transition-all flex items-center gap-1.5
+                        ${currentPageIssues.every(i => i.isIgnored) 
+                            ? 'bg-slate-200 text-slate-500 border-slate-300 hover:bg-slate-300' 
+                            : 'bg-blue-50 text-blue-600 border-blue-100 hover:bg-blue-100'}`}
+                >
+                    <FontAwesomeIcon icon={currentPageIssues.every(i => i.isIgnored) ? faRotateLeft : faCheckDouble} />
+                    {currentPageIssues.every(i => i.isIgnored) ? "Undo All" : "Resolve All"}
+                </button>
+             )}
+          </div>
+
+          {/* Issue List Content */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50/30 scrollbar-thin scrollbar-thumb-slate-200">
+             {currentPageIssues.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-slate-300 gap-4">
+                    <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center">
+                        <FontAwesomeIcon icon={faMagnifyingGlass} className="text-2xl text-slate-200" />
+                    </div>
+                    <span className="text-xs font-medium">No issues found on this page</span>
+                </div>
+             ) : (
+                currentPageIssues.map((issue) => (
+                    <div 
+                        key={issue.id} 
+                        onClick={() => toggleIssueStatus(issue.id)} 
+                        className={`group p-4 rounded-xl border cursor-pointer transition-all duration-200 relative select-none
+                            ${issue.isIgnored 
+                                ? 'bg-slate-50 border-slate-200 opacity-60' 
+                                : 'bg-white border-slate-200 shadow-sm hover:shadow-md hover:border-blue-200 hover:-translate-y-0.5'
+                            }
+                        `}
+                    >
+                        <div className="flex justify-between items-start mb-2">
+                            <span className={`font-bold tracking-wider px-2 py-0.5 rounded text-[9px] uppercase border
+                                ${issue.severity === 'error' 
+                                    ? 'bg-rose-50 text-rose-600 border-rose-100' 
+                                    : 'bg-amber-50 text-amber-600 border-amber-100'
+                                }
+                            `}>
+                                {issue.code}
+                            </span>
+                            {issue.isIgnored && (
+                                <span className="text-blue-500 bg-blue-50 p-1 rounded-full w-5 h-5 flex items-center justify-center">
+                                    <FontAwesomeIcon icon={faCheck} size="xs" />
+                                </span>
+                            )}
+                        </div>
+                        
+                        <p className={`text-xs leading-relaxed ${issue.isIgnored ? 'text-slate-400 line-through decoration-slate-300' : 'text-slate-600'}`}>
+                            {issue.message}
+                        </p>
+                    </div>
+                ))
+             )}
           </div>
 
         </div>
